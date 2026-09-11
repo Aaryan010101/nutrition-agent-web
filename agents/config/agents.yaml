@@ -1,0 +1,455 @@
+# =============================================================================
+# Thali & Pulse — watsonx Orchestrate Agent Definitions
+#
+# This file defines all five agents for import into watsonx Orchestrate.
+# Each agent block maps to one agent in the Agent Builder UI.
+#
+# How to use:
+#   1. Open your watsonx Orchestrate instance.
+#   2. Navigate to Agent Builder > Import agent.
+#   3. Upload this YAML or paste each agent definition individually.
+#   4. Set WATSONX_PROJECT_ID and WATSONX_API_KEY as environment secrets
+#      in Orchestrate's secret manager.
+#
+# Agent hierarchy:
+#
+#   thali_pulse_orchestrator  (supervisor)
+#     ├── nutrition_knowledge_agent   (collaborator)
+#     ├── diet_recommendation_agent   (collaborator)
+#     ├── food_log_feedback_agent     (collaborator)
+#     └── health_advisory_agent       (collaborator)
+# =============================================================================
+
+agents:
+
+  # ---------------------------------------------------------------------------
+  # 1. Nutrition Knowledge Agent
+  # ---------------------------------------------------------------------------
+  - name: nutrition_knowledge_agent
+    display_name: "Nutrition Knowledge Agent"
+    description: >
+      Retrieves verified nutrition data (calories, macros, vitamins, cost)
+      for Indian foods from the RAG vector store powered by the Indian Food
+      Composition Tables. Can look up a single food, compare two foods for a
+      given goal, or search by free-text criteria (e.g. "high-iron breakfast
+      under ₹30").
+    model:
+      provider: watsonx
+      model_id: ibm/granite-3-3-8b-instruct
+      parameters:
+        max_new_tokens: 512
+        temperature: 0.2
+        top_p: 0.9
+    tools:
+      - name: look_up_food_nutrition
+        description: >
+          Retrieve calorie and macro data for a named Indian food item.
+          Returns scaled nutrition facts per number of servings.
+        source:
+          type: python_function
+          module: tools.nutrition_knowledge_tools
+          function: look_up_food_nutrition
+        input_schema:
+          type: object
+          properties:
+            food_name:
+              type: string
+              description: Common or regional Indian food name.
+            servings:
+              type: number
+              description: Number of servings (default 1.0).
+          required: [food_name]
+
+      - name: compare_foods
+        description: >
+          Compare two Indian foods and explain which is better for a
+          stated goal (weight_loss, muscle_gain, maintenance).
+        source:
+          type: python_function
+          module: tools.nutrition_knowledge_tools
+          function: compare_foods
+        input_schema:
+          type: object
+          properties:
+            food_a:
+              type: string
+            food_b:
+              type: string
+            goal:
+              type: string
+              enum: [weight_loss, muscle_gain, maintenance]
+          required: [food_a, food_b]
+
+      - name: search_foods_by_criteria
+        description: >
+          Search the Indian food knowledge base by free-text criteria
+          with optional scalar filters on cost and protein content.
+        source:
+          type: python_function
+          module: tools.nutrition_knowledge_tools
+          function: search_foods_by_criteria
+        input_schema:
+          type: object
+          properties:
+            query:
+              type: string
+            max_cost_inr:
+              type: number
+            min_protein_g:
+              type: number
+            top_k:
+              type: integer
+          required: [query]
+
+    system_prompt: |
+      You are the Nutrition Knowledge Agent for Thali & Pulse.
+      Your sole job is to retrieve accurate, verified nutrition information
+      about Indian foods from the knowledge base.
+
+      Rules:
+      - ONLY return values found in the retrieved data. Never invent numbers.
+      - Always show cost (₹) alongside nutrition facts.
+      - Use warm, everyday Indian food language.
+      - End every response with the disclaimer:
+        "⚠️ This is general nutrition information, not medical advice."
+
+  # ---------------------------------------------------------------------------
+  # 2. Diet Recommendation Agent
+  # ---------------------------------------------------------------------------
+  - name: diet_recommendation_agent
+    display_name: "Diet Recommendation Agent"
+    description: >
+      Builds a personalised, budget-constrained Indian thali meal plan
+      (breakfast, lunch, snack, dinner) tailored to the user's age, goal,
+      city, and daily food budget. Also handles meal swaps, grocery list
+      generation, and weekly cost projection.
+    model:
+      provider: watsonx
+      model_id: ibm/granite-3-3-8b-instruct
+      parameters:
+        max_new_tokens: 1024
+        temperature: 0.2
+        top_p: 0.9
+    tools:
+      - name: generate_day_plan
+        description: >
+          Generate a full personalised Indian day plan with 4 meals.
+          Respects calorie target, macros, city, and daily budget.
+        source:
+          type: python_function
+          module: tools.diet_recommendation_tools
+          function: generate_day_plan
+        input_schema:
+          type: object
+          properties:
+            age:           {type: integer}
+            goal:          {type: string, enum: [weight_loss, muscle_gain, maintenance]}
+            city:          {type: string}
+            daily_budget_inr: {type: number}
+            is_vegetarian: {type: boolean}
+            weight_kg:     {type: number}
+            height_cm:     {type: number}
+          required: [age, goal, city, daily_budget_inr]
+
+      - name: swap_meal
+        description: >
+          Suggest a calorie- and budget-equivalent alternative for a
+          single meal slot.
+        source:
+          type: python_function
+          module: tools.diet_recommendation_tools
+          function: swap_meal
+        input_schema:
+          type: object
+          properties:
+            slot:                {type: string, enum: [breakfast, lunch, snack, dinner]}
+            current_items:       {type: string}
+            goal:                {type: string}
+            city:                {type: string}
+            calorie_allowance:   {type: number}
+            budget_allowance_inr:{type: number}
+            reason:              {type: string}
+          required: [slot, current_items, goal, city, calorie_allowance, budget_allowance_inr]
+
+      - name: generate_grocery_list
+        description: Produce a shopping list from a day plan.
+        source:
+          type: python_function
+          module: tools.diet_recommendation_tools
+          function: generate_grocery_list
+        input_schema:
+          type: object
+          properties:
+            meals_json: {type: string}
+            servings:   {type: integer}
+            days:       {type: integer}
+          required: [meals_json]
+
+      - name: estimate_weekly_cost
+        description: >
+          Project weekly and monthly food costs from a daily cost figure
+          and check against the user's monthly budget.
+        source:
+          type: python_function
+          module: tools.diet_recommendation_tools
+          function: estimate_weekly_cost
+        input_schema:
+          type: object
+          properties:
+            daily_cost_inr:     {type: number}
+            monthly_budget_inr: {type: number}
+          required: [daily_cost_inr, monthly_budget_inr]
+
+    system_prompt: |
+      You are the Diet Recommendation Agent for Thali & Pulse.
+      Build Indian meal plans that are realistic, affordable, and
+      regionally appropriate.
+
+      Rules:
+      - Never recommend imported superfoods (quinoa, kale, etc.)
+        unless the user explicitly requests them.
+      - Always attach ₹ cost estimates to every meal and to the daily total.
+      - Explain WHY foods were chosen in 1-2 sentences.
+      - End every response with:
+        "⚠️ This is general nutrition guidance, not medical advice."
+
+  # ---------------------------------------------------------------------------
+  # 3. Food Log & Feedback Agent
+  # ---------------------------------------------------------------------------
+  - name: food_log_feedback_agent
+    display_name: "Food Log & Feedback Agent"
+    description: >
+      Accepts a meal description (free text or photo description) and
+      returns a nutritional breakdown (calories, protein, carbs, fat, cost)
+      plus honest feedback on whether it fits the user's daily targets.
+      Also tracks the running daily balance across logged meals.
+    model:
+      provider: watsonx
+      model_id: ibm/granite-3-3-8b-instruct
+      parameters:
+        max_new_tokens: 512
+        temperature: 0.2
+        top_p: 0.9
+    tools:
+      - name: analyze_meal_text
+        description: >
+          Parse a meal description, look up all mentioned foods in the
+          knowledge base, compute totals, and generate feedback.
+        source:
+          type: python_function
+          module: tools.food_log_tools
+          function: analyze_meal_text
+        input_schema:
+          type: object
+          properties:
+            meal_description: {type: string}
+            goal:             {type: string}
+          required: [meal_description]
+
+      - name: check_daily_balance
+        description: >
+          Compare cumulative logged nutrition against the user's daily
+          calorie and protein targets.
+        source:
+          type: python_function
+          module: tools.food_log_tools
+          function: check_daily_balance
+        input_schema:
+          type: object
+          properties:
+            logged_calories:    {type: number}
+            logged_protein_g:   {type: number}
+            logged_carbs_g:     {type: number}
+            logged_fat_g:       {type: number}
+            target_calories:    {type: integer}
+            target_protein_g:   {type: number}
+            meals_logged:       {type: integer}
+          required: [logged_calories, logged_protein_g, logged_carbs_g,
+                     logged_fat_g, target_calories, target_protein_g]
+
+      - name: log_meal
+        description: Log a single meal slot and return a compact nutrition summary.
+        source:
+          type: python_function
+          module: tools.food_log_tools
+          function: log_meal
+        input_schema:
+          type: object
+          properties:
+            slot:             {type: string, enum: [breakfast, lunch, snack, dinner]}
+            meal_description: {type: string}
+            goal:             {type: string}
+          required: [slot, meal_description]
+
+    system_prompt: |
+      You are the Food Log & Feedback Agent for Thali & Pulse.
+      Help users track what they eat and understand how it fits their goals.
+
+      Rules:
+      - Be honest but kind — if a meal is high in sodium, say so gently with
+        a practical suggestion.
+      - Always show the ₹ cost of the meal.
+      - Ground all nutrition claims in the retrieved food data.
+      - End every response with:
+        "⚠️ This is general nutrition information, not medical advice."
+
+  # ---------------------------------------------------------------------------
+  # 4. Health Advisory Agent
+  # ---------------------------------------------------------------------------
+  - name: health_advisory_agent
+    display_name: "Health Advisory Agent"
+    description: >
+      Reviews the user's daily or weekly nutrition totals against ICMR/WHO
+      reference values and raises preventive health flags (e.g. high sodium,
+      low iron, low fibre). Provides practical solutions using Indian foods.
+      NOT a medical diagnosis tool.
+    model:
+      provider: watsonx
+      model_id: ibm/granite-3-3-8b-instruct
+      parameters:
+        max_new_tokens: 512
+        temperature: 0.1   # conservative for health advice
+        top_p: 0.9
+    tools:
+      - name: flag_health_concerns
+        description: >
+          Scan daily nutrition totals against ICMR RDA thresholds and
+          return a list of flags with practical remedies.
+        source:
+          type: python_function
+          module: tools.health_advisory_tools
+          function: flag_health_concerns
+        input_schema:
+          type: object
+          properties:
+            calories_kcal: {type: number}
+            protein_g:     {type: number}
+            carbs_g:       {type: number}
+            fat_g:         {type: number}
+            fiber_g:       {type: number}
+            sodium_mg:     {type: number}
+            iron_mg:       {type: number}
+            calcium_mg:    {type: number}
+            age:           {type: integer}
+            is_female:     {type: boolean}
+            goal:          {type: string}
+          required: [calories_kcal, protein_g, carbs_g, fat_g, fiber_g,
+                     sodium_mg, iron_mg, calcium_mg]
+
+      - name: get_rda_guidance
+        description: >
+          Return ICMR/WHO recommended dietary allowance and Indian food
+          sources for a specific nutrient.
+        source:
+          type: python_function
+          module: tools.health_advisory_tools
+          function: get_rda_guidance
+        input_schema:
+          type: object
+          properties:
+            nutrient:  {type: string}
+            age:       {type: integer}
+            is_female: {type: boolean}
+          required: [nutrient]
+
+      - name: generate_weekly_health_summary
+        description: >
+          Produce an encouraging weekly health summary from averaged
+          daily nutrition values.
+        source:
+          type: python_function
+          module: tools.health_advisory_tools
+          function: generate_weekly_health_summary
+        input_schema:
+          type: object
+          properties:
+            avg_calories:   {type: number}
+            avg_protein_g:  {type: number}
+            avg_sodium_mg:  {type: number}
+            avg_fiber_g:    {type: number}
+            avg_iron_mg:    {type: number}
+            days_on_plan:   {type: integer}
+            goal:           {type: string}
+          required: [avg_calories, avg_protein_g, avg_sodium_mg,
+                     avg_fiber_g, avg_iron_mg, days_on_plan]
+
+    system_prompt: |
+      You are the Health Advisory Agent for Thali & Pulse.
+      Your role is preventive wellness guidance — NOT medical diagnosis.
+
+      Rules:
+      - Only raise flags that are supported by ICMR/WHO reference values.
+      - Always suggest Indian food solutions — never generic supplements
+        unless the user asks.
+      - Use a reassuring, non-alarmist tone.
+      - ALWAYS end with:
+        "⚠️ Thali & Pulse is not a substitute for professional medical or
+        dietary advice. Please consult a registered dietitian or physician."
+
+  # ---------------------------------------------------------------------------
+  # 5. Thali & Pulse Orchestrator (Supervisor)
+  # ---------------------------------------------------------------------------
+  - name: thali_pulse_orchestrator
+    display_name: "Thali & Pulse 🍽️"
+    description: >
+      Top-level supervisor agent for Thali & Pulse — a personalised
+      Indian nutrition assistant. Collects the user profile, routes tasks
+      to the four specialist collaborator agents, and assembles warm,
+      practical responses that always show ₹ cost alongside nutrition info.
+    model:
+      provider: watsonx
+      model_id: ibm/granite-3-3-8b-instruct
+      parameters:
+        max_new_tokens: 1024
+        temperature: 0.2
+        top_p: 0.9
+    collaborators:
+      - agent: nutrition_knowledge_agent
+        description: >
+          Use when the user asks about the nutrition facts of a specific
+          food, wants to compare two foods, or needs a search by
+          criteria (e.g. "high-protein snack under ₹25").
+      - agent: diet_recommendation_agent
+        description: >
+          Use when the user wants a full day meal plan, wants to swap
+          a meal, needs a grocery list, or wants to see cost projections.
+      - agent: food_log_feedback_agent
+        description: >
+          Use when the user logs or describes a meal they have eaten
+          and wants a nutritional breakdown and feedback.
+      - agent: health_advisory_agent
+        description: >
+          Use after a full day's meals are logged, or when the user
+          asks about a specific nutrient requirement or wants a weekly
+          health review.
+    system_prompt: |
+      You are **Thali & Pulse** — a warm, practical Indian nutrition assistant.
+      Think of yourself as a helpful local nutritionist who knows Indian food
+      deeply and cares about real budgets.
+
+      ## Onboarding
+      On first interaction, greet the user warmly and collect in a single
+      friendly message:
+        1. Age
+        2. Goal (weight loss / muscle gain / maintenance)
+        3. City
+        4. Monthly food budget (₹)
+        5. Vegetarian or non-vegetarian
+
+      Do NOT proceed to planning until all five are collected.
+
+      ## Routing rules
+      - Nutrition facts / food comparisons → nutrition_knowledge_agent
+      - Meal planning / swaps / grocery list → diet_recommendation_agent
+      - Meal logging / daily balance check → food_log_feedback_agent
+      - Health flags / RDA / weekly summary → health_advisory_agent
+
+      ## Output rules
+      - ALWAYS show ₹ cost alongside every nutrition figure.
+      - NEVER recommend quinoa, kale, açaí or other imported items unless
+        the user explicitly asks.
+      - End EVERY substantive response with:
+        "⚠️ Disclaimer: Thali & Pulse provides general nutrition information
+        only. It is not a substitute for personalised medical or dietary
+        advice. Please consult a registered dietitian or physician before
+        making significant changes to your diet."

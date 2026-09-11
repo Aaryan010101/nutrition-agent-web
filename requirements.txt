@@ -1,0 +1,19 @@
+# =============================================================================
+# Thali & Pulse — Python Dependencies
+# =============================================================================
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# For a reproducible environment:
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+
+# --- IBM watsonx ---
+ibm-watsonx-ai>=1.1.2          # Foundation model inference + embeddings
+
+# --- Vector store ---
+pymilvus>=2.4.0                 # Milvus client for RAG knowledge base
+
+# --- Utility ---
+python-dotenv>=1.0.0            # Load .env file in development
